@@ -1,0 +1,86 @@
+{
+  "name": "kube",
+  "displayName": "kube",
+  "description": "kubernetes client used to perform various functions on kuberentes cluster",
+  "version": "0.0.1",
+  "publisher": "internal-tools",
+  "enabledApiProposals": [
+    "languageModelProxy"
+  ],
+  "engines": {
+    "vscode": ">=1.96.2"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onChatParticipant:kubeCopilot.kube"
+  ],
+  "extensionDependencies": [
+    "github.copilot-chat"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "kubeCopilot.kube",
+        "name": "kube",
+        "fullName": "Kube Copilot",
+        "description": "Operate Kubernetes (scale, status, rollout) from natural language commands.",
+        "isSticky": true
+      }
+    ],
+    "configuration": {
+      "title": "Kube Copilot",
+      "properties": {
+        "kubeCopilot.context": {
+          "type": "string",
+          "default": "",
+          "description": "Optional: kube context name to use. If empty, uses current context from kubeconfig."
+        },
+        "kubeCopilot.namespace": {
+          "type": "string",
+          "default": "dev",
+          "description": "Default namespace"
+        },
+        "kubeCopilot.allowNamespaces": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "dev",
+            "qa"
+          ],
+          "description": "Allowed namespaces"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/request": "^2.48.13",
+    "@types/vscode": ">=1.96.2",
+    "@types/ws": "^8.18.1",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^2.26.0",
+    "eslint": "^9.39.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.52.0"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^0.22.0",
+    "node-fetch": "^3.3.2"
+  }
+}
