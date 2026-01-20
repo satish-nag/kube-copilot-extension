@@ -81,6 +81,8 @@
   },
   "dependencies": {
     "@kubernetes/client-node": "^0.22.0",
-    "node-fetch": "^3.3.2"
+    "jsonrepair": "^3.13.2",
+    "node-fetch": "^3.3.2",
+    "zod": "^4.3.5"
   }
 }

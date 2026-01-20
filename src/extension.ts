@@ -1,24 +1,10 @@
 import * as vscode from "vscode";
-import * as k8s from "@kubernetes/client-node";
+import { executeTool, isMutating, loadKubeConfig, ToolCall, ToolResult } from "./kubernetes";
+import { jsonrepair } from "jsonrepair";
 
 /* =========================================================
  * Types
  * ========================================================= */
-
-type ToolName =
-  | "listNamespaces"
-  | "listNamespacedPod"
-  | "listNamespacedEvent"
-  | "getNamespace"
-  | "createNamespace"
-  | "createPod"
-  | "scaleDeployment"
-  | "getDeploymentStatus";
-
-type ToolCall = {
-  tool: ToolName;
-  args: Record<string, any>;
-};
 
 type Plan = {
   summary: string;
@@ -26,14 +12,8 @@ type Plan = {
   done: boolean; // Indicates if the agent has completed the task
 };
 
-type ToolResult = {
-  tool: ToolName;
-  args: Record<string, any>;
-  ok: boolean;
-  result: any;
-};
-
 type PendingAction = {
+  originalUserText: string;
   plan: Plan;
   pendingToolCalls: ToolCall[];
   priorResults: ToolResult[];
@@ -59,156 +39,255 @@ export function activate(context: vscode.ExtensionContext) {
   const participant = vscode.chat.createChatParticipant(
     "kubeCopilot.kube",
     async (request, _chatContext, stream, token) => {
-      const userText = (request.prompt ?? "").trim();
-      if (!userText) {
-        stream.markdown(helpText());
-        return;
-      }
-
-      const cfg = vscode.workspace.getConfiguration("kubeCopilot");
-      const defaultNamespace = cfg.get<string>("namespace") ?? "dev";
-      const allowedNamespaces = new Set(cfg.get<string[]>("allowNamespaces") ?? ["dev"]);
-      const maxReplicas = cfg.get<number>("maxReplicas") ?? 20;
-      const allowedImages = cfg.get<string[]>("allowedImages") ?? [];
-
-      /* ---------------------------------------------
-       * Load kubeconfig
-       * --------------------------------------------- */
-      const kc = new k8s.KubeConfig();
-      try {
-        kc.loadFromDefault();
-      } catch (e: any) {
-        stream.markdown(`❌ Failed to load kubeconfig: \`${e.message}\``);
-        return;
-      }
-
-      const sessionKey = getSessionKey();
-
-      /* ---------------------------------------------
-       * Handle confirm / cancel
-       * --------------------------------------------- */
-      const pending = pendingBySession.get(sessionKey);
-      if (pending && /^(confirm|yes|proceed|ok)$/i.test(userText)) {
-        stream.markdown("✅ Confirmed. Executing changes…");
-
-        const results: ToolResult[] = [...pending.priorResults];
-        for (const call of pending.pendingToolCalls) {
-          results.push(await executeTool(kc, call, allowedNamespaces, allowedImages, maxReplicas));
-        }
-
-        pendingBySession.delete(sessionKey);
-        const formatted = await formatWithLm(userText, pending.plan.summary, results, stream,request.model.family);
-        return;
-      }
-
-      if (pending && /^(cancel|no|stop)$/i.test(userText)) {
-        pendingBySession.delete(sessionKey);
-        stream.markdown("❌ Cancelled. No changes were made.");
-        return;
-      }
-
-      /* ---------------------------------------------
-       * Iterative Agent Loop
-       * --------------------------------------------- */
-      const MAX_ITERATIONS = 5;
-      const allResults: ToolResult[] = [];
-      let currentSummary = "";
-      let iterationCount = 0;
-
-      while (iterationCount < MAX_ITERATIONS) {
-        iterationCount++;
-        console.log(`\n=== Iteration ${iterationCount} ===`);
-
-        /* ---------------------------------------------
-         * Plan with Copilot LLM
-         * --------------------------------------------- */
-        let plan: Plan;
-        try {
-          plan = await planWithLm(
-            userText,
-            {
-              defaultNamespace,
-              allowedNamespaces: [...allowedNamespaces],
-              maxReplicas,
-              allowedImages
-            },
-            allResults, // Pass previous results
-            token,
-            request.model.family
-          );
-        } catch (e: any) {
-          stream.markdown(`❌ Failed to plan request: \`${e.message}\``);
-          return;
-        }
-
-        console.log(`Plan (iteration ${iterationCount}):`, JSON.stringify(plan));
-        currentSummary = plan.summary;
-
-        // If no tool calls and done, break
-        if (plan.toolCalls.length === 0 && plan.done) {
-          console.log("Agent marked as done with no tool calls");
-          break;
-        }
-
-        /* ---------------------------------------------
-         * Execute read-only tools
-         * --------------------------------------------- */
-        const readonlyCalls = plan.toolCalls.filter(c => !isMutating(c.tool));
-        const mutatingCalls = plan.toolCalls.filter(c => isMutating(c.tool));
-
-        console.log("readonlyCalls:", JSON.stringify(readonlyCalls));
-        console.log("mutatingCalls:", JSON.stringify(mutatingCalls));
-
-        for (const call of readonlyCalls) {
-          const result = await executeTool(kc, call, allowedNamespaces, allowedImages, maxReplicas);
-          allResults.push(result);
-        }
-
-        console.log("Current results:", JSON.stringify(allResults));
-
-        /* ---------------------------------------------
-         * Ask for confirmation if needed
-         * --------------------------------------------- */
-        if (mutatingCalls.length > 0) {
-          pendingBySession.set(sessionKey, {
-            plan,
-            pendingToolCalls: mutatingCalls,
-            priorResults: allResults
-          });
-
-          stream.markdown(
-            `### Planned changes\n` +
-            `**${plan.summary}**\n\n` +
-            mutatingCalls.map(c => `- **${c.tool}** ${JSON.stringify(c.args)}`).join("\n") +
-            `\n\nReply **confirm** to proceed or **cancel** to stop.`
-          );
-          return;
-        }
-
-        /* ---------------------------------------------
-         * Check if agent is done
-         * --------------------------------------------- */
-        if (plan.done) {
-          console.log("Agent marked as done");
-          break;
-        }
-      }
-
-      if (iterationCount >= MAX_ITERATIONS) {
-        stream.markdown(`⚠️ Reached maximum iterations (${MAX_ITERATIONS}). Stopping.\n\n`);
-      }
-
-      /* ---------------------------------------------
-       * Format final response
-       * --------------------------------------------- */
-      const formatted = await formatWithLm(userText, currentSummary, allResults, stream, request.model.family);
+      await handleChatRequest(request, stream, token);
     }
   );
 
   context.subscriptions.push(participant);
+  vscode.commands.registerCommand('kubeCopilot.kube.confirm', async () => {
+    vscode.commands.executeCommand('workbench.action.chat.open', '@kube confirm')
+  });
+  vscode.commands.registerCommand('kubeCopilot.kube.cancel', async () => {
+    vscode.commands.executeCommand('workbench.action.chat.open', '@kube cancel')
+  });
 }
 
+
 export function deactivate() { }
+
+type ExtensionConfig = {
+  defaultNamespace: string;
+  allowedNamespaces: Set<string>;
+  maxReplicas: number;
+  allowedImages: string[];
+};
+
+async function handleChatRequest(
+  request: vscode.ChatRequest,
+  stream: vscode.ChatResponseStream,
+  token: vscode.CancellationToken
+): Promise<void> {
+  const userText = (request.prompt ?? "").trim();
+  if (!userText) {
+    stream.markdown(helpText());
+    return;
+  }
+
+  const cfg = getExtensionConfig();
+  const kc = loadKubeConfig(stream);
+  if (!kc) return;
+
+  const sessionKey = getSessionKey();
+  const pending = pendingBySession.get(sessionKey);
+
+  if (pending) {
+    const handled = await handlePendingAction(
+      userText,
+      pending,
+      sessionKey,
+      kc,
+      cfg,
+      stream,
+      request.model.family,
+      token
+    );
+    if (handled) return;
+  }
+
+  await runAgentLoop(
+    userText,
+    kc,
+    cfg,
+    sessionKey,
+    stream,
+    token,
+    request.model.family
+  );
+}
+
+function getExtensionConfig(): ExtensionConfig {
+  const cfg = vscode.workspace.getConfiguration("kubeCopilot");
+  return {
+    defaultNamespace: cfg.get<string>("namespace") ?? "dev",
+    allowedNamespaces: new Set(cfg.get<string[]>("allowNamespaces") ?? ["dev"]),
+    maxReplicas: cfg.get<number>("maxReplicas") ?? 20,
+    allowedImages: cfg.get<string[]>("allowedImages") ?? []
+  };
+}
+
+async function handlePendingAction(
+  userText: string,
+  pending: PendingAction,
+  sessionKey: string,
+  kc: import("@kubernetes/client-node").KubeConfig,
+  cfg: ExtensionConfig,
+  stream: vscode.ChatResponseStream,
+  modelFamily: string,
+  token: vscode.CancellationToken
+): Promise<boolean> {
+  if (/^(confirm|yes|proceed|ok)$/i.test(userText)) {
+    stream.markdown("✅ Confirmed. Executing changes…");
+
+    const results: ToolResult[] = [...pending.priorResults];
+    for (const call of pending.pendingToolCalls) {
+      results.push(await executeTool(kc, call, cfg.allowedNamespaces, cfg.allowedImages, cfg.maxReplicas));
+    }
+
+    pendingBySession.delete(sessionKey);
+    if (!pending.plan.done) {
+      await runAgentLoop(
+        pending.originalUserText,
+        kc,
+        cfg,
+        sessionKey,
+        stream,
+        token,
+        modelFamily,
+        results
+      );
+      return true;
+    }
+
+    await formatWithLm(pending.originalUserText, pending.plan.summary, results, stream, modelFamily);
+    return true;
+  }
+
+  if (/^(cancel|no|stop)$/i.test(userText)) {
+    pendingBySession.delete(sessionKey);
+    stream.markdown("❌ Cancelled. No changes were made.");
+    return true;
+  }
+
+  return false;
+}
+
+async function runAgentLoop(
+  userText: string,
+  kc: import("@kubernetes/client-node").KubeConfig,
+  cfg: ExtensionConfig,
+  sessionKey: string,
+  stream: vscode.ChatResponseStream,
+  token: vscode.CancellationToken,
+  modelFamily: string,
+  initialResults?: ToolResult[]
+): Promise<void> {
+  const MAX_ITERATIONS = 10;
+  const allResults: ToolResult[] = initialResults ? [...initialResults] : [];
+  let currentSummary = "";
+  let iterationCount = 0;
+
+  while (iterationCount < MAX_ITERATIONS) {
+    iterationCount++;
+    console.log(`\n=== Iteration ${iterationCount} ===`);
+
+    let plan: Plan;
+    try {
+      plan = await planWithLm(
+        userText,
+        {
+          defaultNamespace: cfg.defaultNamespace,
+          allowedNamespaces: [...cfg.allowedNamespaces],
+          maxReplicas: cfg.maxReplicas,
+          allowedImages: cfg.allowedImages
+        },
+        allResults,
+        token,
+        modelFamily
+      );
+    } catch (e: any) {
+      stream.markdown(`❌ Failed to plan request: \`${e.message}\``);
+      return;
+    }
+
+    console.log(`Plan (iteration ${iterationCount}):`, JSON.stringify(plan));
+    currentSummary = plan.summary;
+
+    if (plan.toolCalls.length === 0 && plan.done) {
+      console.log("Agent marked as done with no tool calls");
+      break;
+    }
+
+    const { readonlyCalls, mutatingCalls } = splitToolCalls(plan.toolCalls);
+    console.log("readonlyCalls:", JSON.stringify(readonlyCalls));
+    console.log("mutatingCalls:", JSON.stringify(mutatingCalls));
+
+    await executeReadonlyCalls(kc, readonlyCalls, cfg, allResults);
+    console.log("Current results:", JSON.stringify(allResults));
+
+    if (mutatingCalls.length > 0) {
+      queuePendingActions(sessionKey, userText, plan, mutatingCalls, allResults);
+      promptForConfirmation(stream, plan, mutatingCalls);
+      return;
+    }
+
+    if (plan.done) {
+      console.log("Agent marked as done");
+      break;
+    }
+  }
+
+  if (iterationCount >= MAX_ITERATIONS) {
+    stream.markdown(`⚠️ Reached maximum iterations (${MAX_ITERATIONS}). Stopping.\n\n`);
+  }
+
+  await formatWithLm(userText, currentSummary, allResults, stream, modelFamily);
+}
+
+function splitToolCalls(toolCalls: ToolCall[]): { readonlyCalls: ToolCall[]; mutatingCalls: ToolCall[] } {
+  return {
+    readonlyCalls: toolCalls.filter(c => !isMutating(c.tool)),
+    mutatingCalls: toolCalls.filter(c => isMutating(c.tool))
+  };
+}
+
+async function executeReadonlyCalls(
+  kc: import("@kubernetes/client-node").KubeConfig,
+  calls: ToolCall[],
+  cfg: ExtensionConfig,
+  allResults: ToolResult[]
+): Promise<void> {
+  for (const call of calls) {
+    const result = await executeTool(kc, call, cfg.allowedNamespaces, cfg.allowedImages, cfg.maxReplicas);
+    allResults.push(result);
+  }
+}
+
+function queuePendingActions(
+  sessionKey: string,
+  userText: string,
+  plan: Plan,
+  mutatingCalls: ToolCall[],
+  priorResults: ToolResult[]
+): void {
+  pendingBySession.set(sessionKey, {
+    originalUserText: userText,
+    plan,
+    pendingToolCalls: mutatingCalls,
+    priorResults
+  });
+}
+
+function promptForConfirmation(
+  stream: vscode.ChatResponseStream,
+  plan: Plan,
+  mutatingCalls: ToolCall[]
+): void {
+  stream.markdown(
+    `### Planned changes\n` +
+    `**${plan.summary}**\n\n` +
+    mutatingCalls.map(c => `- **${c.tool}** ${JSON.stringify(c.args)} \n Behaviour: ${c.args.note || ""}`).join("\n") +
+    `\n\nClick **confirm** to proceed or **cancel** to stop.`
+  );
+  stream.button({
+    command: 'kubeCopilot.kube.confirm',
+    title: vscode.l10n.t('Confirm')
+  });
+  stream.button({
+    command: 'kubeCopilot.kube.cancel',
+    title: vscode.l10n.t('Cancel')
+  });
+}
+
 
 /* =========================================================
  * Planner (Copilot LLM)
@@ -227,37 +306,69 @@ async function planWithLm(
   // Prefer the UI-selected model, fall back to Copilot vendor
   const models = (await lm.selectChatModels({ family: modelFamily }));
   if (!models) throw new Error("No Copilot model available");
-console.log("Using model:", models);
-console.log("ctx:", ctx);
-const model = models[0];
+  console.log("Using model:", models);
+  console.log("ctx:", ctx);
+  const model = models[0];
   const system = `
 You are a Kubernetes planning engine for a VS Code extension.
 
-You MUST ALWAYS return valid JSON.
-You MUST NEVER return an empty response.
-You MUST NOT explain anything.
+Output MUST be a single valid JSON object and NOTHING else.
+- Do not wrap in Markdown fences.
+- Do not add comments, trailing commas, or extra keys.
+- Do not echo the user request.
+- Do not include explanations.
 
-Output ONLY this JSON format:
+Your response must match this schema:
 
+schema:
 {
   "summary": string,
   "toolCalls": [
-    { "tool": "...", "args": { ... } }
+    { "tool": "...", "args": { ... }  }
   ],
   "done": boolean
 }
 
+IMPORTANT ABOUT THE FIELDS:
+- ALL RESPONSES MUST OBEY THE SCHEMA ABOVE
+- All information about the user's request,solution,analysis and everything must be captured in the "summary" field.
+- If any tool call is mutating (create/update/scale/delete), provide a detailed description about the behaviour of that operation after the change is applied for EACH mutating call and append it to summary.
+
 Allowed tools:
-listNamespaces, listNamespacedPod, listNamespacedEvent, getNamespace, createNamespace, createPod, scaleDeployment, getDeploymentStatus
+listNamespaces, listNamespacedPod, listNamespacedEvent, listNamespacedDeployment, listNamespacedService, getService, listIstioObject, getIstioObject, getNamespace, createNamespace, createPod, createDeployment, updateDeployment, updateDeploymentImage, createIstioObject, updateIstioObject, createService, updateService, deleteDeployment, scaleDeployment, getDeploymentStatus
+
+createPod args: { namespace: string, name: string, image: string }
+createDeployment args: { namespace: string, name: string, image: string, replicas?: number, port?: number }
+updateDeployment args: { namespace: string, name: string, patch: object } // patch is a strategic merge patch object for the deployment with updated fields
+updateDeploymentImage args: { namespace: string, name: string, image: string }
+deleteDeployment args: { namespace: string, name: string }
+createService args: { namespace: string, name: string, selector: object, port: number, targetPort?: number, type?: string }
+updateService args: { namespace: string, name: string, selector?: object, port?: number, targetPort?: number, type?: string }
+createIstioObject args: { namespace: string, kind: string, manifest: object }
+updateIstioObject args: { namespace: string, kind: string, name: string, patch: object }
+scaleDeployment args: { namespace: string, name: string, replicas: number }
+listNamespacedPod args: { namespace: string }
+listNamespacedEvent args: { namespace: string, podName?: string }
+listNamespacedDeployment args: { namespace: string }
+listNamespacedService args: { namespace: string }
+listIstioObject args: { namespace: string, kind: string }
+getIstioObject args: { namespace: string, kind: string, name: string }
+getService args: { namespace: string, name: string }
+getNamespace args: { name: string }
+createNamespace args: { name: string }
+getDeploymentStatus args: { namespace: string, name: string }
 
 IMPORTANT MULTI-STEP LOGIC:
 - If you need information from one tool before calling another, plan ONE step at a time
+- If mutating tool calls depend on each other, plan ONLY the prerequisite mutating tool calls first and set "done": false so the next iteration can plan the dependent calls
+- If multiple mutating tools are required and they do NOT depend on each other, include all of them in the same plan so they can be confirmed together
 - Set "done": false if you need to call more tools in the next iteration
 - Set "done": true when you have all the information needed to answer the user
+- Always look at events from listNamespacedEvent to determine pod health,failure reasons, etc.
 - Example: To list all pods in all namespaces:
   * First iteration: Call listNamespaces, set done=false
   * Second iteration: Use the namespace results to call listNamespacedPod for each namespace, set done=true
-
+- Always include istio resources when analyzing services, deployments, pods.
 Previous tool results will be provided to help you plan the next step.
 
 If the request is simple (like listing namespaces), still return JSON with done=true.
@@ -291,7 +402,29 @@ If unsure, choose the safest read-only tool.
   }
 
   try {
-    return JSON.parse(rawText);
+    const cleanedJson = jsonrepair(rawText.replace("```json", "").replace("```", ""));
+    console.log("Cleaned JSON:", cleanedJson);
+    const parsedJson = JSON.parse(cleanedJson);
+    // if cleanedJson is type of array
+    if (Array.isArray(parsedJson)) {
+      // return the element that is json and contains summary, toolCalls, done
+      for (const element of parsedJson) {
+        // element may be object or a JSON string; normalize to object
+        console.log("Element type:", typeof element, element);
+        const elementJson = typeof element === "string" && element.trim().startsWith("{") ? JSON.parse(element) : element;
+        if (
+          elementJson &&
+          typeof elementJson === "object" &&
+          "summary" in elementJson &&
+          "toolCalls" in elementJson &&
+          "done" in elementJson &&
+          typeof (elementJson as any).done === "boolean"
+        ) {
+          return elementJson as Plan;
+        }
+      }
+    }
+    return parsedJson as Plan;
   } catch (err) {
     console.warn("Invalid JSON from Copilot, using fallback planner", err);
     return fallbackPlan(userText, ctx.defaultNamespace, priorResults);
@@ -372,6 +505,137 @@ function fallbackPlan(userText: string, defaultNamespace: string, priorResults: 
     };
   }
 
+  // Create deployment
+  const createDepMatch = text.match(/(?:create|deploy)\s+deployment\s+(\S+)/);
+  if (createDepMatch) {
+    return {
+      summary: `Create deployment ${createDepMatch[1]}`,
+      toolCalls: [
+        {
+          tool: "createDeployment",
+          args: {
+            namespace: defaultNamespace,
+            name: createDepMatch[1],
+            image: "nginx:latest"
+          }
+        }
+      ],
+      done: true
+    };
+  }
+
+  // Update deployment image
+  const updateImageMatch = text.match(/update\s+deployment\s+(\S+).*image\s+(\S+)/);
+  if (updateImageMatch) {
+    return {
+      summary: `Update deployment ${updateImageMatch[1]} image`,
+      toolCalls: [
+        {
+          tool: "updateDeploymentImage",
+          args: {
+            namespace: defaultNamespace,
+            name: updateImageMatch[1],
+            image: updateImageMatch[2]
+          }
+        }
+      ],
+      done: true
+    };
+  }
+
+  // Delete deployment
+  const deleteDepMatch = text.match(/(?:delete|remove)\s+deployment\s+(\S+)/);
+  if (deleteDepMatch) {
+    return {
+      summary: `Delete deployment ${deleteDepMatch[1]}`,
+      toolCalls: [
+        {
+          tool: "deleteDeployment",
+          args: {
+            namespace: defaultNamespace,
+            name: deleteDepMatch[1]
+          }
+        }
+      ],
+      done: true
+    };
+  }
+
+  // List deployments
+  if (text.includes("deployment") && (text.includes("list") || text.includes("show"))) {
+    return {
+      summary: "List deployments",
+      toolCalls: [{ tool: "listNamespacedDeployment", args: { namespace: defaultNamespace } }],
+      done: true
+    };
+  }
+
+  // Create service
+  const createSvcMatch = text.match(/(?:create|expose)\s+service\s+(\S+)/);
+  if (createSvcMatch) {
+    return {
+      summary: `Create service ${createSvcMatch[1]}`,
+      toolCalls: [
+        {
+          tool: "createService",
+          args: {
+            namespace: defaultNamespace,
+            name: createSvcMatch[1],
+            selector: { app: createSvcMatch[1] },
+            port: 80
+          }
+        }
+      ],
+      done: true
+    };
+  }
+
+  // Update service
+  const updateSvcMatch = text.match(/update\s+service\s+(\S+)/);
+  if (updateSvcMatch) {
+    return {
+      summary: `Update service ${updateSvcMatch[1]}`,
+      toolCalls: [
+        {
+          tool: "updateService",
+          args: {
+            namespace: defaultNamespace,
+            name: updateSvcMatch[1],
+            port: 80
+          }
+        }
+      ],
+      done: true
+    };
+  }
+
+  // Get service
+  const getSvcMatch = text.match(/(?:get|describe)\s+service\s+(\S+)/);
+  if (getSvcMatch) {
+    return {
+      summary: `Get service ${getSvcMatch[1]}`,
+      toolCalls: [
+        {
+          tool: "getService",
+          args: {
+            namespace: defaultNamespace,
+            name: getSvcMatch[1]
+          }
+        }
+      ],
+      done: true
+    };
+  }
+
+  // List services
+  if (text.includes("service") && (text.includes("list") || text.includes("show"))) {
+    return {
+      summary: "List services",
+      toolCalls: [{ tool: "listNamespacedService", args: { namespace: defaultNamespace } }],
+      done: true
+    };
+  }
+
   // Scale deployment
   const scaleMatch = text.match(/scale\s+(\S+)\s+to\s+(\d+)/);
   if (scaleMatch) {
@@ -392,124 +656,6 @@ function fallbackPlan(userText: string, defaultNamespace: string, priorResults: 
   }
 
   throw new Error("Unable to understand request");
-}
-
-/* =========================================================
- * Tool execution
- * ========================================================= */
-
-function isMutating(tool: ToolName): boolean {
-  return tool === "createNamespace" || tool === "createPod" || tool === "scaleDeployment";
-}
-
-async function executeTool(
-  kc: k8s.KubeConfig,
-  call: ToolCall,
-  allowedNamespaces: Set<string>,
-  allowedImages: string[],
-  maxReplicas: number
-): Promise<ToolResult> {
-  try {
-    switch (call.tool) {
-      case "listNamespaces": {
-        const core = kc.makeApiClient(k8s.CoreV1Api);
-        const res = await core.listNamespace();
-        console.log("res: " + JSON.stringify(res))
-        return ok(call, res.body.items.map(i => i.metadata?.name).filter(Boolean));
-      }
-
-      case "listNamespacedPod": {
-        const namespace = call.args.namespace;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
-
-        const core = kc.makeApiClient(k8s.CoreV1Api);
-        const res = await core.listNamespacedPod(namespace);
-        console.log("res: " + JSON.stringify(res))
-        return ok(call, res.body.items);
-      }
-
-      case "listNamespacedEvent": {
-        const namespace = call.args.namespace || "default";
-        const podName = call.args.podName;
-
-        const core = kc.makeApiClient(k8s.CoreV1Api);
-        const res = await core.listNamespacedEvent(namespace, undefined, undefined, undefined, `involvedObject.namespace=${namespace}`);
-        console.log("res: " + JSON.stringify(res))
-        return ok(call, res.body.items.map(i => {
-          return {
-            "name": i.metadata?.name,
-            "message": i?.message,
-            "namespace": i.metadata?.namespace
-          }
-        }));
-      }
-
-      case "getNamespace": {
-        const core = kc.makeApiClient(k8s.CoreV1Api);
-        const res = await core.readNamespace(call.args.name);
-        console.log("res: " + JSON.stringify(res))
-        return ok(call, { name: res.body.metadata?.name });
-      }
-
-      case "createNamespace": {
-        const name = call.args.name;
-        const core = kc.makeApiClient(k8s.CoreV1Api);
-        const res = await core.createNamespace({ metadata: { name } } as any);
-        console.log("res: " + JSON.stringify(res))
-        return ok(call, { name: res.body.metadata?.name });
-      }
-
-      case "createPod": {
-        const { namespace, name, image } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
-        if (allowedImages.length && !allowedImages.some(p => image.startsWith(p)))
-          throw new Error("Image not allowed");
-
-        const core = kc.makeApiClient(k8s.CoreV1Api);
-        const pod: k8s.V1Pod = {
-          apiVersion: "v1",
-          kind: "Pod",
-          metadata: { name },
-          spec: {
-            restartPolicy: "Never",
-            containers: [{ name: "main", image }]
-          }
-        };
-        const res = await core.createNamespacedPod(namespace, pod);
-        return ok(call, { name: res.body.metadata?.name });
-      }
-
-      case "scaleDeployment": {
-        const { namespace, name, replicas } = call.args;
-
-        const apps = kc.makeApiClient(k8s.AppsV1Api);
-
-        const res = await apps.replaceNamespacedDeploymentScale(
-          name,
-          namespace,
-          {
-            apiVersion: "autoscaling/v1",
-            kind: "Scale",
-            spec: { replicas }
-          } as any
-        );
-
-        return ok(call, res.body);
-      }
-
-      case "getDeploymentStatus": {
-        const apps = kc.makeApiClient(k8s.AppsV1Api);
-        const res = await apps.readNamespacedDeployment(call.args.name, call.args.namespace);
-        return ok(call, res.body.status);
-      }
-    }
-  } catch (e: any) {
-    return { tool: call.tool, args: call.args, ok: false, result: e.message };
-  }
-}
-
-function ok(call: ToolCall, result: any): ToolResult {
-  return { tool: call.tool, args: call.args, ok: true, result };
 }
 
 /* =========================================================
@@ -551,6 +697,8 @@ Ask Kubernetes questions in natural language.
 
 Examples:
 - Deploy nginx pod in test namespace
+- Create deployment web in dev namespace
+- Create service web in dev namespace
 - Scale payments service to 3 replicas
 - What namespaces exist?
 - Is my-app healthy?
