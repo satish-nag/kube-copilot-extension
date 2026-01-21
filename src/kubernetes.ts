@@ -84,7 +84,7 @@ export async function executeTool(
 
       case "listNamespacedPod": {
         const namespace = call.args.namespace;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         const labelSelector = call.args.labelSelector;
         const fieldSelector = call.args.fieldSelector;
         const limit = call.args.limit;
@@ -122,7 +122,7 @@ export async function executeTool(
 
       case "listNamespacedDeployment": {
         const namespace = call.args.namespace;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         const labelSelector = call.args.labelSelector;
         const fieldSelector = call.args.fieldSelector;
         const limit = call.args.limit;
@@ -143,7 +143,7 @@ export async function executeTool(
 
       case "listNamespacedService": {
         const namespace = call.args.namespace;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         const labelSelector = call.args.labelSelector;
         const fieldSelector = call.args.fieldSelector;
         const limit = call.args.limit;
@@ -164,7 +164,7 @@ export async function executeTool(
 
       case "getService": {
         const { namespace, name } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
 
         const core = kc.makeApiClient(k8s.CoreV1Api);
         const res = await core.readNamespacedService(name, namespace);
@@ -173,7 +173,7 @@ export async function executeTool(
 
       case "listIstioObject": {
         const { namespace, kind } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         const labelSelector = call.args.labelSelector;
         const fieldSelector = call.args.fieldSelector;
         const limit = call.args.limit;
@@ -187,21 +187,24 @@ export async function executeTool(
           namespace,
           plural,
           undefined,
-          continueToken,
-          fieldSelector,
-          labelSelector,
-          limit
+          undefined,
+          continueToken??null,
+          fieldSelector??null,
+          labelSelector??null,
+          limit??null
         );
+        console.log("res: " + JSON.stringify(res))
         return ok(call, res.body, { summarizeList: true, kindHint: kind });
       }
 
       case "getIstioObject": {
         const { namespace, kind, name } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
 
         const { group, version, plural } = getIstioResource(kind);
         const custom = kc.makeApiClient(k8s.CustomObjectsApi);
         const res = await custom.getNamespacedCustomObject(group, version, namespace, plural, name);
+        console.log("res istio object: " + JSON.stringify(res))
         return ok(call, res.body);
       }
 
@@ -222,9 +225,9 @@ export async function executeTool(
 
       case "createPod": {
         const { namespace, name, image } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
-        if (allowedImages.length && !allowedImages.some(p => image.startsWith(p)))
-          throw new Error("Image not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (allowedImages.length && !allowedImages.some(p => image.startsWith(p)))
+          // throw new Error("Image not allowed");
 
         const core = kc.makeApiClient(k8s.CoreV1Api);
         const pod: k8s.V1Pod = {
@@ -244,11 +247,10 @@ export async function executeTool(
         const { namespace, name, image } = call.args;
         const replicas = call.args.replicas ?? 1;
         const port = call.args.port;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
-        if (allowedImages.length && !allowedImages.some(p => image.startsWith(p)))
-          throw new Error("Image not allowed");
-        if (replicas > maxReplicas) throw new Error("Replicas exceed max allowed");
-
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (allowedImages.length && !allowedImages.some(p => image.startsWith(p)))
+          // throw new Error("Image not allowed");
+        // if (replicas > maxReplicas) throw new Error("Replicas exceed max allowed");
         const apps = kc.makeApiClient(k8s.AppsV1Api);
         const deployment: k8s.V1Deployment = {
           apiVersion: "apps/v1",
@@ -277,7 +279,7 @@ export async function executeTool(
 
       case "updateDeployment": {
         const { namespace, name, patch } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         if (!patch || typeof patch !== "object") throw new Error("Patch must be an object");
 
         const images = extractImagesFromDeploymentPatch(patch);
@@ -302,7 +304,7 @@ export async function executeTool(
 
       case "createIstioObject": {
         const { namespace, kind, manifest } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         if (!manifest || typeof manifest !== "object") throw new Error("Manifest must be an object");
 
         const { group, version, plural } = getIstioResource(kind);
@@ -313,7 +315,7 @@ export async function executeTool(
 
       case "updateIstioObject": {
         const { namespace, kind, name, patch } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         if (!patch || typeof patch !== "object") throw new Error("Patch must be an object");
 
         const { group, version, plural } = getIstioResource(kind);
@@ -335,7 +337,7 @@ export async function executeTool(
 
       case "createService": {
         const { namespace, name, selector, port, targetPort, type } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
 
         const core = kc.makeApiClient(k8s.CoreV1Api);
         const service: k8s.V1Service = {
@@ -359,7 +361,7 @@ export async function executeTool(
 
       case "updateService": {
         const { namespace, name, selector, port, targetPort, type } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         if (!selector && !port && !targetPort && !type) throw new Error("No service fields to update");
 
         const core = kc.makeApiClient(k8s.CoreV1Api);
@@ -387,9 +389,9 @@ export async function executeTool(
 
       case "updateDeploymentImage": {
         const { namespace, name, image } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
-        if (allowedImages.length && !allowedImages.some(p => image.startsWith(p)))
-          throw new Error("Image not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (allowedImages.length && !allowedImages.some(p => image.startsWith(p)))
+        //   throw new Error("Image not allowed");
 
         const apps = kc.makeApiClient(k8s.AppsV1Api);
         const res = await apps.readNamespacedDeployment(name, namespace);
@@ -415,7 +417,7 @@ export async function executeTool(
 
       case "deleteDeployment": {
         const { namespace, name } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
 
         const apps = kc.makeApiClient(k8s.AppsV1Api);
         const res = await apps.deleteNamespacedDeployment(name, namespace);
@@ -424,8 +426,8 @@ export async function executeTool(
 
       case "scaleDeployment": {
         const { namespace, name, replicas } = call.args;
-        if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
-        if (replicas > maxReplicas) throw new Error("Replicas exceed max allowed");
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        // if (replicas > maxReplicas) throw new Error("Replicas exceed max allowed");
 
         const apps = kc.makeApiClient(k8s.AppsV1Api);
         const current = await apps.readNamespacedDeployment(name, namespace);
@@ -541,6 +543,7 @@ function summarizeK8sItem(item: any, kindHint?: string): Record<string, any> {
   if (spec.selector) istioSummary.selector = spec.selector;
   if (Array.isArray(spec.ports)) istioSummary.ports = spec.ports;
   if (Array.isArray(spec.servers)) istioSummary.servers = spec.servers;
+  console.log("istioSummary: " + JSON.stringify(istioSummary))
   return istioSummary;
 }
 

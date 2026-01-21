@@ -351,7 +351,7 @@ listNamespacedPod args: { namespace: string, labelSelector?: string, fieldSelect
 listNamespacedEvent args: { namespace: string, podName?: string }
 listNamespacedDeployment args: { namespace: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string }
 listNamespacedService args: { namespace: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string }
-listIstioObject args: { namespace: string, kind: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string }
+listIstioObject args: { namespace: string, kind: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string } // kind can be VirtualService, DestinationRule, Gateway, etc.
 getIstioObject args: { namespace: string, kind: string, name: string }
 getService args: { namespace: string, name: string }
 getNamespace args: { name: string }
