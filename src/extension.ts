@@ -335,7 +335,7 @@ IMPORTANT ABOUT THE FIELDS:
 - If any tool call is mutating (create/update/scale/delete), provide a detailed description about the behaviour of that operation after the change is applied for EACH mutating call and append it to summary.
 
 Allowed tools:
-listNamespaces, listNamespacedPod, listNamespacedEvent, listNamespacedDeployment, listNamespacedService, getService, listIstioObject, getIstioObject, getNamespace, createNamespace, createPod, createDeployment, updateDeployment, updateDeploymentImage, createIstioObject, updateIstioObject, createService, updateService, deleteDeployment, scaleDeployment, getDeploymentStatus
+listNamespaces, listNamespacedPod, listNamespacedEvent, listNamespacedDeployment, listNamespacedService, listNamespacedConfigMap, getService, getConfigMap, listIstioObject, getIstioObject, getNamespace, createNamespace, createPod, createDeployment, updateDeployment, updateDeploymentImage, createIstioObject, updateIstioObject, createConfigMap, updateConfigMap, createService, updateService, deleteDeployment, scaleDeployment, getDeploymentStatus
 
 createPod args: { namespace: string, name: string, image: string }
 createDeployment args: { namespace: string, name: string, image: string, replicas?: number, port?: number }
@@ -344,6 +344,8 @@ updateDeploymentImage args: { namespace: string, name: string, image: string }
 deleteDeployment args: { namespace: string, name: string }
 createService args: { namespace: string, name: string, selector: object, port: number, targetPort?: number, type?: string }
 updateService args: { namespace: string, name: string, selector?: object, port?: number, targetPort?: number, type?: string }
+createConfigMap args: { namespace: string, name: string, data?: object, binaryData?: object }
+updateConfigMap args: { namespace: string, name: string, data?: object, binaryData?: object }
 createIstioObject args: { namespace: string, kind: string, manifest: object }
 updateIstioObject args: { namespace: string, kind: string, name: string, patch: object }
 scaleDeployment args: { namespace: string, name: string, replicas: number }
@@ -351,9 +353,11 @@ listNamespacedPod args: { namespace: string, labelSelector?: string, fieldSelect
 listNamespacedEvent args: { namespace: string, podName?: string }
 listNamespacedDeployment args: { namespace: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string }
 listNamespacedService args: { namespace: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string }
+listNamespacedConfigMap args: { namespace: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string }
 listIstioObject args: { namespace: string, kind: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string } // kind can be VirtualService, DestinationRule, Gateway, etc.
 getIstioObject args: { namespace: string, kind: string, name: string }
 getService args: { namespace: string, name: string }
+getConfigMap args: { namespace: string, name: string }
 getNamespace args: { name: string }
 createNamespace args: { name: string }
 getDeploymentStatus args: { namespace: string, name: string }
@@ -364,6 +368,9 @@ IMPORTANT MULTI-STEP LOGIC:
 - If multiple mutating tools are required and they do NOT depend on each other, include all of them in the same plan so they can be confirmed together
 - Set "done": false if you need to call more tools in the next iteration
 - Set "done": true when you have all the information needed to answer the user
+- For any list* tool call, ALWAYS include a small limit (e.g., 50) and a labelSelector or fieldSelector when possible.
+- If you cannot identify any safe filter for a list* call, ask a clarification question instead of listing everything.
+- Field selectors only filter metadata and status fields, NOT spec. For Istio objects, prefer labelSelector or getIstioObject by name.
 - Always look at events from listNamespacedEvent to determine pod health,failure reasons, etc.
 - Example: To list all pods in all namespaces:
   * First iteration: Call listNamespaces, set done=false

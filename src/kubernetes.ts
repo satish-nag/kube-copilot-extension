@@ -8,6 +8,8 @@ export type ToolName =
   | "listNamespacedDeployment"
   | "listNamespacedService"
   | "getService"
+  | "listNamespacedConfigMap"
+  | "getConfigMap"
   | "listIstioObject"
   | "getIstioObject"
   | "getNamespace"
@@ -18,6 +20,8 @@ export type ToolName =
   | "updateDeploymentImage"
   | "createIstioObject"
   | "updateIstioObject"
+  | "createConfigMap"
+  | "updateConfigMap"
   | "createService"
   | "updateService"
   | "deleteDeployment"
@@ -60,6 +64,8 @@ export function isMutating(tool: ToolName): boolean {
     tool === "updateDeploymentImage" ||
     tool === "createIstioObject" ||
     tool === "updateIstioObject" ||
+    tool === "createConfigMap" ||
+    tool === "updateConfigMap" ||
     tool === "createService" ||
     tool === "updateService" ||
     tool === "deleteDeployment" ||
@@ -87,7 +93,7 @@ export async function executeTool(
         // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         const labelSelector = call.args.labelSelector;
         const fieldSelector = call.args.fieldSelector;
-        const limit = call.args.limit;
+        const limit = call.args.limit ?? 50;
         const continueToken = call.args.continueToken;
 
         const core = kc.makeApiClient(k8s.CoreV1Api);
@@ -125,7 +131,7 @@ export async function executeTool(
         // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         const labelSelector = call.args.labelSelector;
         const fieldSelector = call.args.fieldSelector;
-        const limit = call.args.limit;
+        const limit = call.args.limit ?? 50;
         const continueToken = call.args.continueToken;
 
         const apps = kc.makeApiClient(k8s.AppsV1Api);
@@ -146,7 +152,7 @@ export async function executeTool(
         // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         const labelSelector = call.args.labelSelector;
         const fieldSelector = call.args.fieldSelector;
-        const limit = call.args.limit;
+        const limit = call.args.limit ?? 50;
         const continueToken = call.args.continueToken;
 
         const core = kc.makeApiClient(k8s.CoreV1Api);
@@ -171,12 +177,42 @@ export async function executeTool(
         return ok(call, res.body);
       }
 
+      case "listNamespacedConfigMap": {
+        const namespace = call.args.namespace;
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        const labelSelector = call.args.labelSelector;
+        const fieldSelector = call.args.fieldSelector;
+        const limit = call.args.limit ?? 50;
+        const continueToken = call.args.continueToken;
+
+        const core = kc.makeApiClient(k8s.CoreV1Api);
+        const res = await core.listNamespacedConfigMap(
+          namespace,
+          undefined,
+          undefined,
+          continueToken,
+          fieldSelector,
+          labelSelector,
+          limit
+        );
+        return ok(call, res.body, { summarizeList: true, kindHint: "ConfigMap" });
+      }
+
+      case "getConfigMap": {
+        const { namespace, name } = call.args;
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+
+        const core = kc.makeApiClient(k8s.CoreV1Api);
+        const res = await core.readNamespacedConfigMap(name, namespace);
+        return ok(call, res.body);
+      }
+
       case "listIstioObject": {
         const { namespace, kind } = call.args;
         // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
         const labelSelector = call.args.labelSelector;
         const fieldSelector = call.args.fieldSelector;
-        const limit = call.args.limit;
+        const limit = call.args.limit ?? 50;
         const continueToken = call.args.continueToken;
 
         const { group, version, plural } = getIstioResource(kind);
@@ -359,6 +395,36 @@ export async function executeTool(
         return ok(call, { name: res.body.metadata?.name });
       }
 
+      case "createConfigMap": {
+        const { namespace, name, data, binaryData } = call.args;
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+
+        const core = kc.makeApiClient(k8s.CoreV1Api);
+        const cm: k8s.V1ConfigMap = {
+          apiVersion: "v1",
+          kind: "ConfigMap",
+          metadata: { name },
+          data,
+          binaryData
+        };
+        const res = await core.createNamespacedConfigMap(namespace, cm);
+        return ok(call, { name: res.body.metadata?.name });
+      }
+
+      case "updateConfigMap": {
+        const { namespace, name, data, binaryData } = call.args;
+        // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        if (!data && !binaryData) throw new Error("No ConfigMap data to update");
+
+        const core = kc.makeApiClient(k8s.CoreV1Api);
+        const current = await core.readNamespacedConfigMap(name, namespace);
+        const cm = current.body;
+        cm.data = { ...(cm.data ?? {}), ...(data ?? {}) };
+        cm.binaryData = { ...(cm.binaryData ?? {}), ...(binaryData ?? {}) };
+        const updated = await core.replaceNamespacedConfigMap(name, namespace, cm);
+        return ok(call, { name: updated.body.metadata?.name });
+      }
+
       case "updateService": {
         const { namespace, name, selector, port, targetPort, type } = call.args;
         // if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
@@ -527,6 +593,19 @@ function summarizeK8sItem(item: any, kindHint?: string): Record<string, any> {
       clusterIP: spec.clusterIP,
       ports: spec.ports?.map((p: any) => ({ port: p?.port, targetPort: p?.targetPort, protocol: p?.protocol })),
       selector: spec.selector,
+      labels
+    };
+  }
+
+  if (kindHint === "ConfigMap" || kind === "ConfigMap") {
+    const data = item?.data ?? {};
+    const binaryData = item?.binaryData ?? {};
+    return {
+      kind: "ConfigMap",
+      name,
+      namespace,
+      dataKeys: Object.keys(data),
+      binaryDataKeys: Object.keys(binaryData),
       labels
     };
   }
