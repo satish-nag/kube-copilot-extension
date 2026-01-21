@@ -36,6 +36,11 @@ export type ToolResult = {
   result: any;
 };
 
+type OkOptions = {
+  summarizeList?: boolean;
+  kindHint?: string;
+};
+
 export function loadKubeConfig(stream: vscode.ChatResponseStream): k8s.KubeConfig | null {
   const kc = new k8s.KubeConfig();
   try {
@@ -80,11 +85,23 @@ export async function executeTool(
       case "listNamespacedPod": {
         const namespace = call.args.namespace;
         if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        const labelSelector = call.args.labelSelector;
+        const fieldSelector = call.args.fieldSelector;
+        const limit = call.args.limit;
+        const continueToken = call.args.continueToken;
 
         const core = kc.makeApiClient(k8s.CoreV1Api);
-        const res = await core.listNamespacedPod(namespace);
+        const res = await core.listNamespacedPod(
+          namespace,
+          undefined,
+          undefined,
+          continueToken,
+          fieldSelector,
+          labelSelector,
+          limit
+        );
         console.log("res: " + JSON.stringify(res))
-        return ok(call, res.body.items);
+        return ok(call, res.body, { summarizeList: true, kindHint: "Pod" });
       }
 
       case "listNamespacedEvent": {
@@ -106,19 +123,43 @@ export async function executeTool(
       case "listNamespacedDeployment": {
         const namespace = call.args.namespace;
         if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        const labelSelector = call.args.labelSelector;
+        const fieldSelector = call.args.fieldSelector;
+        const limit = call.args.limit;
+        const continueToken = call.args.continueToken;
 
         const apps = kc.makeApiClient(k8s.AppsV1Api);
-        const res = await apps.listNamespacedDeployment(namespace);
-        return ok(call, res.body.items);
+        const res = await apps.listNamespacedDeployment(
+          namespace,
+          undefined,
+          undefined,
+          continueToken,
+          fieldSelector,
+          labelSelector,
+          limit
+        );
+        return ok(call, res.body, { summarizeList: true, kindHint: "Deployment" });
       }
 
       case "listNamespacedService": {
         const namespace = call.args.namespace;
         if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        const labelSelector = call.args.labelSelector;
+        const fieldSelector = call.args.fieldSelector;
+        const limit = call.args.limit;
+        const continueToken = call.args.continueToken;
 
         const core = kc.makeApiClient(k8s.CoreV1Api);
-        const res = await core.listNamespacedService(namespace);
-        return ok(call, res.body.items);
+        const res = await core.listNamespacedService(
+          namespace,
+          undefined,
+          undefined,
+          continueToken,
+          fieldSelector,
+          labelSelector,
+          limit
+        );
+        return ok(call, res.body, { summarizeList: true, kindHint: "Service" });
       }
 
       case "getService": {
@@ -133,11 +174,25 @@ export async function executeTool(
       case "listIstioObject": {
         const { namespace, kind } = call.args;
         if (!allowedNamespaces.has(namespace)) throw new Error("Namespace not allowed");
+        const labelSelector = call.args.labelSelector;
+        const fieldSelector = call.args.fieldSelector;
+        const limit = call.args.limit;
+        const continueToken = call.args.continueToken;
 
         const { group, version, plural } = getIstioResource(kind);
         const custom = kc.makeApiClient(k8s.CustomObjectsApi);
-        const res = await custom.listNamespacedCustomObject(group, version, namespace, plural);
-        return ok(call, res.body);
+        const res = await custom.listNamespacedCustomObject(
+          group,
+          version,
+          namespace,
+          plural,
+          undefined,
+          continueToken,
+          fieldSelector,
+          labelSelector,
+          limit
+        );
+        return ok(call, res.body, { summarizeList: true, kindHint: kind });
       }
 
       case "getIstioObject": {
@@ -398,7 +453,18 @@ export async function executeTool(
   }
 }
 
-function ok(call: ToolCall, result: any): ToolResult {
+function ok(call: ToolCall, result: any, options?: OkOptions): ToolResult {
+  if (options?.summarizeList && result && Array.isArray(result.items)) {
+    const continueToken = result.metadata?.continue ?? result.metadata?._continue;
+    const items = summarizeK8sList(result.items, options.kindHint);
+    return {
+      tool: call.tool,
+      args: call.args,
+      ok: true,
+      result: { items, continueToken }
+    };
+  }
+
   return { tool: call.tool, args: call.args, ok: true, result };
 }
 
@@ -406,6 +472,76 @@ function extractImagesFromDeploymentPatch(patch: any): string[] {
   const containers = patch?.spec?.template?.spec?.containers;
   if (!Array.isArray(containers)) return [];
   return containers.map((c: any) => c?.image).filter((img: any) => typeof img === "string");
+}
+
+function summarizeK8sList(items: any[], kindHint?: string): any[] {
+  return items.map(item => summarizeK8sItem(item, kindHint));
+}
+
+function summarizeK8sItem(item: any, kindHint?: string): Record<string, any> {
+  const kind = kindHint ?? item?.kind;
+  const meta = item?.metadata ?? {};
+  const name = meta?.name;
+  const namespace = meta?.namespace;
+  const labels = meta?.labels;
+
+  if (kindHint === "Pod" || kind === "Pod") {
+    const status = item?.status ?? {};
+    const containers = item?.spec?.containers ?? [];
+    return {
+      kind: "Pod",
+      name,
+      namespace,
+      phase: status.phase,
+      nodeName: status.nodeName,
+      podIP: status.podIP,
+      containers: containers.map((c: any) => ({ name: c?.name, image: c?.image })),
+      labels
+    };
+  }
+
+  if (kindHint === "Deployment" || kind === "Deployment") {
+    const spec = item?.spec ?? {};
+    const status = item?.status ?? {};
+    return {
+      kind: "Deployment",
+      name,
+      namespace,
+      replicas: spec.replicas,
+      availableReplicas: status.availableReplicas,
+      updatedReplicas: status.updatedReplicas,
+      strategy: spec?.strategy?.type,
+      labels
+    };
+  }
+
+  if (kindHint === "Service" || kind === "Service") {
+    const spec = item?.spec ?? {};
+    return {
+      kind: "Service",
+      name,
+      namespace,
+      type: spec.type,
+      clusterIP: spec.clusterIP,
+      ports: spec.ports?.map((p: any) => ({ port: p?.port, targetPort: p?.targetPort, protocol: p?.protocol })),
+      selector: spec.selector,
+      labels
+    };
+  }
+
+  const spec = item?.spec ?? {};
+  const istioSummary: Record<string, any> = {
+    kind: kindHint ?? kind,
+    name,
+    namespace,
+    labels
+  };
+  if (Array.isArray(spec.hosts)) istioSummary.hosts = spec.hosts;
+  if (Array.isArray(spec.gateways)) istioSummary.gateways = spec.gateways;
+  if (spec.selector) istioSummary.selector = spec.selector;
+  if (Array.isArray(spec.ports)) istioSummary.ports = spec.ports;
+  if (Array.isArray(spec.servers)) istioSummary.servers = spec.servers;
+  return istioSummary;
 }
 
 function getIstioResource(kind: string): { group: string; version: string; plural: string } {

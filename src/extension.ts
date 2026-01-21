@@ -347,11 +347,11 @@ updateService args: { namespace: string, name: string, selector?: object, port?:
 createIstioObject args: { namespace: string, kind: string, manifest: object }
 updateIstioObject args: { namespace: string, kind: string, name: string, patch: object }
 scaleDeployment args: { namespace: string, name: string, replicas: number }
-listNamespacedPod args: { namespace: string }
+listNamespacedPod args: { namespace: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string }
 listNamespacedEvent args: { namespace: string, podName?: string }
-listNamespacedDeployment args: { namespace: string }
-listNamespacedService args: { namespace: string }
-listIstioObject args: { namespace: string, kind: string }
+listNamespacedDeployment args: { namespace: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string }
+listNamespacedService args: { namespace: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string }
+listIstioObject args: { namespace: string, kind: string, labelSelector?: string, fieldSelector?: string, limit?: number, continueToken?: string }
 getIstioObject args: { namespace: string, kind: string, name: string }
 getService args: { namespace: string, name: string }
 getNamespace args: { name: string }
@@ -370,6 +370,7 @@ IMPORTANT MULTI-STEP LOGIC:
   * Second iteration: Use the namespace results to call listNamespacedPod for each namespace, set done=true
 - Always include istio resources when analyzing services, deployments, pods.
 Previous tool results will be provided to help you plan the next step.
+- For list calls, always include limit (e.g., 50) and prefer labelSelector/fieldSelector when possible. Use continueToken to paginate.”
 
 If the request is simple (like listing namespaces), still return JSON with done=true.
 If unsure, choose the safest read-only tool.
