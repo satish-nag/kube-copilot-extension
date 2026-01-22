@@ -334,8 +334,9 @@ IMPORTANT ABOUT THE FIELDS:
 - All information about the user's request,solution,analysis and everything must be captured in the "summary" field.
 - If any tool call is mutating (create/update/scale/delete), provide a detailed description about the behaviour of that operation after the change is applied for EACH mutating call and append it to summary.
 
+
 Allowed tools:
-listNamespaces, listNamespacedPod, listNamespacedEvent, listNamespacedDeployment, listNamespacedService, listNamespacedConfigMap, getService, getConfigMap, listIstioObject, getIstioObject, getNamespace, createNamespace, createPod, createDeployment, updateDeployment, updateDeploymentImage, createIstioObject, updateIstioObject, createConfigMap, updateConfigMap, createService, updateService, deleteDeployment, scaleDeployment, getDeploymentStatus
+listNamespaces, listNamespacedPod, listNamespacedEvent, listNamespacedDeployment, listNamespacedService, listNamespacedConfigMap, getService, getConfigMap, listIstioObject, getIstioObject, getNamespace, createNamespace, createPod, createDeployment, updateDeployment, updateDeploymentImage, createIstioObject, updateIstioObject, createConfigMap, updateConfigMap, createService, updateService, deleteDeployment, scaleDeployment, getDeploymentStatus, getDeployment, getDeploymentRefs, findServicesForDeployment, getVirtualServicesForService, getDestinationRulesForService
 
 createPod args: { namespace: string, name: string, image: string }
 createDeployment args: { namespace: string, name: string, image: string, replicas?: number, port?: number }
@@ -361,8 +362,16 @@ getConfigMap args: { namespace: string, name: string }
 getNamespace args: { name: string }
 createNamespace args: { name: string }
 getDeploymentStatus args: { namespace: string, name: string }
+getDeployment args: { namespace: string, name: string }
+getDeploymentRefs args: { namespace: string, name: string }
+findServicesForDeployment args: { namespace: string, deploymentName: string }
+getVirtualServicesForService args: { namespace: string, serviceName: string }
+getDestinationRulesForService args: { namespace: string, serviceName: string }
 
 IMPORTANT MULTI-STEP LOGIC:
+- For queries like "resources associated with deployment X" or "what configmaps does deployment X use", NEVER call listNamespacedConfigMap; instead call getDeploymentRefs and then getConfigMap for the referenced names.
+- For Istio routing queries for a service/deployment, NEVER call listIstioObject to scan the namespace; instead call findServicesForDeployment (if starting from a deployment) then call getVirtualServicesForService and getDestinationRulesForService for each discovered service.
+- Avoid namespace-wide list* scans unless the user explicitly asks to list all objects; prefer reference-first tools.
 - If you need information from one tool before calling another, plan ONE step at a time
 - If mutating tool calls depend on each other, plan ONLY the prerequisite mutating tool calls first and set "done": false so the next iteration can plan the dependent calls
 - If multiple mutating tools are required and they do NOT depend on each other, include all of them in the same plan so they can be confirmed together

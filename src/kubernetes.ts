@@ -26,7 +26,12 @@ export type ToolName =
   | "updateService"
   | "deleteDeployment"
   | "scaleDeployment"
-  | "getDeploymentStatus";
+  | "getDeploymentStatus"
+  | "getDeployment"
+  | "getDeploymentRefs"
+  | "findServicesForDeployment"
+  | "getVirtualServicesForService"
+  | "getDestinationRulesForService";
 
 export type ToolCall = {
   tool: ToolName;
@@ -224,10 +229,10 @@ export async function executeTool(
           plural,
           undefined,
           undefined,
-          continueToken??null,
-          fieldSelector??null,
-          labelSelector??null,
-          limit??null
+          continueToken ?? undefined,
+          fieldSelector ?? undefined,
+          labelSelector ?? undefined,
+          limit ?? undefined
         );
         console.log("res: " + JSON.stringify(res))
         return ok(call, res.body, { summarizeList: true, kindHint: kind });
@@ -514,7 +519,263 @@ export async function executeTool(
         const res = await apps.readNamespacedDeployment(call.args.name, call.args.namespace);
         return ok(call, res.body.status);
       }
+      case "getDeployment": {
+        const { namespace, name } = call.args;
+        const apps = kc.makeApiClient(k8s.AppsV1Api);
+        const res = await apps.readNamespacedDeployment(name, namespace);
+        return ok(call, summarizeK8sItem(res.body, "Deployment"));
+      }
+
+      case "getDeploymentRefs": {
+        const { namespace, name } = call.args;
+        const apps = kc.makeApiClient(k8s.AppsV1Api);
+        const res = await apps.readNamespacedDeployment(name, namespace);
+        const deployment = res.body;
+        const podLabels = getPodTemplateLabels(deployment);
+        const spec = deployment?.spec ?? {} as k8s.V1DeploymentSpec;
+        const tplSpec = spec?.template?.spec ?? {} as k8s.V1PodSpec;
+        const volumes = tplSpec?.volumes ?? [];
+        const containers = tplSpec?.containers ?? [];
+        const imagePullSecrets = tplSpec?.imagePullSecrets ?? [];
+
+        // ConfigMaps
+        let configMaps: (string | undefined | null)[] = [];
+        // From volumes
+        configMaps = configMaps.concat(
+          volumes
+            .map((v: any) => v?.configMap?.name)
+        );
+        // From envFrom in containers
+        containers.forEach((c: any) => {
+          if (Array.isArray(c.envFrom)) {
+            configMaps = configMaps.concat(
+              c.envFrom.map((ef: any) => ef?.configMapRef?.name)
+            );
+          }
+        });
+        // From env[].valueFrom.configMapKeyRef
+        containers.forEach((c: any) => {
+          if (Array.isArray(c.env)) {
+            configMaps = configMaps.concat(
+              c.env.map((e: any) => e?.valueFrom?.configMapKeyRef?.name)
+            );
+          }
+        });
+
+        // Secrets
+        let secrets: (string | undefined | null)[] = [];
+        // From volumes
+        secrets = secrets.concat(
+          volumes.map((v: any) => v?.secret?.secretName)
+        );
+        // From envFrom in containers
+        containers.forEach((c: any) => {
+          if (Array.isArray(c.envFrom)) {
+            secrets = secrets.concat(
+              c.envFrom.map((ef: any) => ef?.secretRef?.name)
+            );
+          }
+        });
+        // From env[].valueFrom.secretKeyRef
+        containers.forEach((c: any) => {
+          if (Array.isArray(c.env)) {
+            secrets = secrets.concat(
+              c.env.map((e: any) => e?.valueFrom?.secretKeyRef?.name)
+            );
+          }
+        });
+        // From imagePullSecrets
+        secrets = secrets.concat(
+          (imagePullSecrets ?? []).map((s: any) => s?.name)
+        );
+
+        // serviceAccountName
+        const serviceAccountName = tplSpec?.serviceAccountName;
+        // images
+        const images = containers.map((c: any) => c?.image).filter(Boolean);
+
+        return ok(call, {
+          namespace,
+          deployment: name,
+          podLabels,
+          serviceAccountName,
+          images: uniqueStrings(images),
+          configMaps: uniqueStrings(configMaps),
+          secrets: uniqueStrings(secrets)
+        });
+      }
+
+      case "findServicesForDeployment": {
+        const { namespace, deploymentName } = call.args;
+        const apps = kc.makeApiClient(k8s.AppsV1Api);
+        const core = kc.makeApiClient(k8s.CoreV1Api);
+        const depRes = await apps.readNamespacedDeployment(deploymentName, namespace);
+        const podLabels = getPodTemplateLabels(depRes.body);
+        const res = await core.listNamespacedService(
+          namespace,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          200
+        );
+        const services = (res.body.items ?? []).filter(svc => {
+          const selector = svc?.spec?.selector;
+          if (!selector || typeof selector !== "object") return false;
+          return selectorIsSubset(selector, podLabels);
+        });
+        const summarized = services.map(svc => ({
+          name: svc.metadata?.name,
+          selector: svc.spec?.selector,
+          ports: svc.spec?.ports?.map((p: any) => ({
+            port: p?.port,
+            targetPort: p?.targetPort,
+            protocol: p?.protocol
+          })),
+          type: svc.spec?.type
+        }));
+        return ok(call, {
+          namespace,
+          deployment: deploymentName,
+          services: summarized
+        });
+      }
+
+      case "getVirtualServicesForService": {
+        const { namespace, serviceName } = call.args;
+        const candidates = buildServiceHostCandidates(serviceName, namespace);
+        const { group, version, plural } = getIstioResource("virtualservice");
+        const custom = kc.makeApiClient(k8s.CustomObjectsApi);
+        const res = await custom.listNamespacedCustomObject(
+          group,
+          version,
+          namespace,
+          plural,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          200
+        );
+        const items = (res.body as any)?.items ?? [];
+        const matches = extractIstioVirtualServiceMatches(items, candidates);
+        return ok(call, {
+          namespace,
+          serviceName,
+          candidates,
+          virtualServices: matches
+        });
+      }
+
+      case "getDestinationRulesForService": {
+        const { namespace, serviceName } = call.args;
+        const candidates = buildServiceHostCandidates(serviceName, namespace);
+        const { group, version, plural } = getIstioResource("destinationrule");
+        const custom = kc.makeApiClient(k8s.CustomObjectsApi);
+        const res = await custom.listNamespacedCustomObject(
+          group,
+          version,
+          namespace,
+          plural,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          200
+        );
+        const items = (res.body as any)?.items ?? [];
+        const matches = extractIstioDestinationRuleMatches(items, candidates);
+        return ok(call, {
+          namespace,
+          serviceName,
+          candidates,
+          destinationRules: matches
+        });
+      }
     }
+// --------- Helper functions for new tools ---------
+
+function uniqueStrings(arr: (string | undefined | null)[]): string[] {
+  return Array.from(new Set(arr.filter(Boolean) as string[]));
+}
+
+function getPodTemplateLabels(deployment: any): Record<string, string> {
+  return (
+    deployment?.spec?.template?.metadata?.labels && typeof deployment.spec.template.metadata.labels === "object"
+      ? deployment.spec.template.metadata.labels
+      : {}
+  );
+}
+
+function selectorIsSubset(selector: any, labels: Record<string, string>): boolean {
+  if (!selector || typeof selector !== "object" || !labels) return false;
+  for (const k of Object.keys(selector)) {
+    if (labels[k] !== selector[k]) return false;
+  }
+  return true;
+}
+
+function buildServiceHostCandidates(serviceName: string, namespace: string): string[] {
+  return [
+    serviceName,
+    `${serviceName}.${namespace}`,
+    `${serviceName}.${namespace}.svc`,
+    `${serviceName}.${namespace}.svc.cluster.local`
+  ];
+}
+
+function extractIstioVirtualServiceMatches(items: any[], candidates: string[]): any[] {
+  return (items ?? []).map((item: any) => {
+    const spec = item?.spec ?? {};
+    const hosts = spec?.hosts ?? [];
+    const gateways = spec?.gateways ?? [];
+    let matchedBy: string[] = [];
+    // match via spec.hosts
+    if (Array.isArray(hosts) && hosts.some((h: string) => candidates.includes(h))) {
+      matchedBy.push("hosts");
+    }
+    // match via any http[*].route[*].destination.host
+    if (Array.isArray(spec.http)) {
+      for (const http of spec.http) {
+        if (Array.isArray(http.route)) {
+          for (const route of http.route) {
+            if (route?.destination?.host && candidates.includes(route.destination.host)) {
+              matchedBy.push("route.destination.host");
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (matchedBy.length === 0) return null;
+    return {
+      name: item?.metadata?.name,
+      hosts,
+      gateways,
+      matchedBy
+    };
+  }).filter(Boolean);
+}
+
+function extractIstioDestinationRuleMatches(items: any[], candidates: string[]): any[] {
+  return (items ?? []).map((item: any) => {
+    const spec = item?.spec ?? {};
+    const host = spec?.host;
+    if (!host || !candidates.includes(host)) return null;
+    let subsets: string[] = [];
+    if (Array.isArray(spec.subsets)) {
+      subsets = spec.subsets.map((s: any) => s?.name).filter(Boolean);
+    }
+    return {
+      name: item?.metadata?.name,
+      host,
+      subsets
+    };
+  }).filter(Boolean);
+}
   } catch (e: any) {
     console.log("error: " + JSON.stringify(e))
     return { tool: call.tool, args: call.args, ok: false, result: e.message };
@@ -626,6 +887,7 @@ function summarizeK8sItem(item: any, kindHint?: string): Record<string, any> {
   return istioSummary;
 }
 
+// --------- Istio Resource Lookup ---------
 function getIstioResource(kind: string): { group: string; version: string; plural: string } {
   const normalized = String(kind || "").toLowerCase();
   switch (normalized) {
